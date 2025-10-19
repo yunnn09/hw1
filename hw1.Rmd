@@ -1,0 +1,550 @@
+---
+title: "Hw1"
+date: "2025-10-12"
+output: html_document
+---
+### 1.Introduction&Setup
+##### Briefly describe the purpose of this analysis (NHANES data, 2021–2023).
+分析BMI及SBP的分佈（清理資料前後），並進一步分析不同教育程度、種族的BMI分佈狀況及視覺化分析資料庫中三次收縮壓、舒張壓的狀況。
+
+##### Load all required packages and datasets.
+
+##### Ensure reproducibility by including all code chunks in order.
+```{r}
+library("tidyverse")
+pkgs <- c("tidyverse","haven","janitor","stringr","scales","skimr","naniar") 
+to_install <- setdiff(pkgs, rownames(installed.packages()))
+if (length(to_install)) install.packages(to_install)
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+getwd()
+setwd('/Users/chang/學校/大三上/健康大數據')
+dir.create("outputs", showWarnings = FALSE) 
+data_dir <- "/Users/chang/學校/大三上/健康大數據/data_raw"  
+list.files("/Users/chang/學校/大三上/健康大數據/data_raw")
+
+demo <- read_xpt(file.path(data_dir,"DEMO_L.XPT.txt")) %>% clean_names()  # %>% is one of the most important operators in the tidyverse, it pronounce as“and then”
+bpx  <- read_xpt(file.path(data_dir,"BPXO_L.XPT.txt")) %>% clean_names()  # clean_names() from janitor package: make column names consistent (lowercase, no spaces or special characters)
+bmx  <- read_xpt(file.path(data_dir,"BMX_L.XPT.txt"))  %>% clean_names()
+```
+
+### 2.Week 5 Components (BMI & SBP Cleaning)
+##### Data loading, handling missing values. 
+##### Outlier cleaning (BMI, SBP).
+##### Boxplots (Before vs After).
+##### Scatter plot: BMI vs SBP by sex.
+##### Missingness barplot (Before vs After).
+```{r}
+# quick overviews (on-screen)
+skimr::skim(demo); skimr::skim(bpx); skimr::skim(bmx)
+
+gg_miss_var(bpx, show_pct = TRUE) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Proportion of Missing Values per Variable") 
+
+sbp_cols <- names(bpx)[stringr::str_detect(names(bpx), "^bpxo?sy[1-3]$")]  
+dbp_cols <- names(bpx)[stringr::str_detect(names(bpx), "^bpxo?di[1-3]$")] 
+
+# Build BEFORE (raw) variables and dataset
+bmi_raw <- bmx %>%
+  transmute(seqn, bmi_raw = bmxbmi)  
+
+table(demo$riagendr) 
+
+demo <- demo %>%
+  mutate(riagendr = as.numeric(riagendr)) %>%       
+  filter(is.na(riagendr) | riagendr %in% c(1, 2))   
+
+demo_sex <- demo %>%
+  transmute(seqn, age = ridageyr,
+            sex = factor(riagendr, levels=c(1,2), labels=c("Male","Female")))
+
+dat_raw <- demo_sex %>%
+  left_join(bmi_raw, by="seqn") %>%  
+  filter(age >= 20) %>%
+  mutate(
+    bmi_raw = ifelse(is.nan(bmi_raw), NA_real_, bmi_raw) 
+  )
+# Draw BEFORE plots
+# BMI boxplot (BEFORE) 
+bmi_before_df <- dat_raw %>% transmute(stage = "Before (raw BMI)", value = bmi_raw)
+x <- bmi_before_df$value
+qs <- quantile(x, c(.25,.75), na.rm = TRUE)  
+iqr <- qs[2]-qs[1]
+upper_whisker <- min(max(x, na.rm = TRUE), qs[2] + 1.5*iqr) 
+bmi_before_label_y <- upper_whisker + 0.05*iqr
+bmi_before_N <- sum(!is.na(x))  
+
+p_bmi_before <- ggplot(bmi_before_df, aes(stage, value, fill = stage)) +
+  geom_boxplot(width = 0.6, outlier.alpha = 0.15, fatten = 1.2) +
+  geom_text(data = tibble(stage="Before (raw BMI)", y=bmi_before_label_y, N=bmi_before_N),
+            aes(stage, y, label=paste0("n = ", N)), hjust = -1, size = 3.5, inherit.aes = FALSE) +
+  scale_fill_manual(values = c("Before (raw BMI)" = "#D6E9F8")) +
+  labs(title = "BMI (BEFORE): Raw Distribution", x = NULL, y = "BMI") +
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.12))) +
+  theme_minimal(base_size = 12) + theme(legend.position = "none", panel.grid.minor = element_blank())
+ggsave("outputs/q1_box_bmi_before.png", p_bmi_before, bg = "white")
+p_bmi_before
+
+# OUTLIER CLEANING 
+BMI_LO <- 10; BMI_HI <- 80
+bmi_clean <- bmx %>%
+  transmute(seqn, bmxbmi) %>%
+  mutate(
+    q1 = quantile(bmxbmi, 0.25, na.rm=TRUE),
+    q3 = quantile(bmxbmi, 0.75, na.rm=TRUE),
+    iqr = q3 - q1,
+    lo_iqr = q1 - 1.5*iqr,
+    hi_iqr = q3 + 1.5*iqr,
+    med = median(bmxbmi, na.rm=TRUE),
+    madv = mad(bmxbmi, na.rm=TRUE),
+    z = ifelse(madv > 0, (bmxbmi - med)/(madv*1.4826), 0),  
+    flag = (bmxbmi < BMI_LO | bmxbmi > BMI_HI) | (bmxbmi < lo_iqr | bmxbmi > hi_iqr) | (abs(z) > 3.5),
+    bmxbmi_clean = ifelse(flag, NA_real_, bmxbmi)
+  ) %>% select(seqn, bmxbmi_clean)
+
+# Build AFTER (clean) dataset 
+dat_clean <- demo_sex %>%
+  left_join(bmi_clean, by="seqn") %>%
+  filter(age >= 20) %>%
+  mutate(
+    bmxbmi_clean = ifelse(is.nan(bmxbmi_clean), NA_real_, bmxbmi_clean)  
+  )
+
+# AFTER plots
+# BMI boxplot (AFTER) 
+bmi_after_df <- dat_clean %>% transmute(stage = "After (clean BMI)", value = bmxbmi_clean)
+x <- bmi_after_df$value
+qs <- quantile(x, c(.25,.75), na.rm = TRUE); 
+iqr <- qs[2]-qs[1]
+upper_whisker <- min(max(x, na.rm = TRUE), qs[2] + 1.5*iqr)
+bmi_after_label_y <- upper_whisker + 0.05*iqr
+bmi_after_N <- sum(!is.na(x))
+
+p_bmi_after <- ggplot(bmi_after_df, aes(stage, value, fill = stage)) +
+  geom_boxplot(width = 0.6, outlier.alpha = 0.15, fatten = 1.2) +
+  geom_text(data = tibble(stage="After (clean BMI)", y=bmi_after_label_y, N=bmi_after_N),
+            aes(stage, y, label=paste0("n = ", N)), hjust = -1, size = 3.5, inherit.aes = FALSE) +
+  scale_fill_manual(values = c("After (clean BMI)" = "#FCE5CD")) +
+  labs(title = "BMI (AFTER): Cleaned Distribution", x = NULL, y = "BMI") +
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.12))) +
+  theme_minimal(base_size = 12) + theme(legend.position = "none", panel.grid.minor = element_blank())
+ggsave("outputs/q1_box_bmi_after.png", p_bmi_after, bg = "white")
+p_bmi_after
+
+#Missing value comparison
+miss_before <- tibble(
+  stage     = "Before",
+  variable  = "BMI",
+  n_missing = sum(is.na(dat_raw$bmi_raw)),
+  n_total   = nrow(dat_raw)
+) %>% mutate(p_missing = n_missing / n_total)
+
+miss_after <- tibble(
+  stage     = "After",
+  variable  = "BMI",
+  n_missing = sum(is.na(dat_clean$bmxbmi_clean)),
+  n_total   = nrow(dat_clean)
+) %>% mutate(p_missing = n_missing / n_total)
+
+miss_long <- bind_rows(miss_before, miss_after) %>%
+  mutate(stage = factor(stage, levels = c("Before","After")),  
+         variable = factor(variable, levels = "BMI"))          
+
+p_na_bar_1 <- ggplot(miss_long, aes(variable, p_missing, fill = stage)) +
+  geom_col(width=0.6, position="dodge") +                                                  
+  geom_text(aes(label = paste0(scales::percent(p_missing, 0.1),
+                               "\n(", n_missing, "/", n_total, ")")),                      
+            vjust=-0.2, size=3.5) +
+  scale_y_continuous(labels=scales::percent) +
+  labs(title = "SBP Missingness Before vs After Cleaning", x=NULL, y="Missing rate") +
+  theme_minimal(base_size=12) + theme(legend.position="top")
+
+pos <- position_dodge(width = 0.65) 
+
+p_na_bar_2 <- ggplot(miss_long, aes(variable, p_missing, fill = stage)) +
+  geom_col(width = 0.6, position = pos) +
+  geom_text(aes(label = paste0(scales::percent(p_missing, 0.1),
+                               "\n(", n_missing, "/", n_total, ")")),
+            position = pos, vjust = -0.2, size = 3.5, lineheight = 0.95) +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.12))) +
+  scale_fill_manual(values = c("Before" = "#9EC5FE", "After" = "#FFCF99")) +
+  labs(title = "Missingness (NA) Before vs After Outlier Removal (BMI)",
+       x = NULL, y = "Missing rate", fill = "Stage") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"),
+        legend.position = "top")
+ggsave("outputs/q1_na_bmi_before_after.png", p_na_bar_2, bg = "white")
+p_na_bar_2 
+
+#sbp
+bpx <- bpx %>%
+  rowwise() %>%
+  mutate(
+    sbp_mean = mean(c_across(all_of(sbp_cols)), na.rm = TRUE),
+    dbp_mean = mean(c_across(all_of(dbp_cols)), na.rm = TRUE)
+  )
+sbp_raw <- bpx %>%
+  transmute(seqn, sbp_raw = sbp_mean )  
+
+table(demo$riagendr) 
+
+demo <- demo %>%
+  mutate(riagendr = as.numeric(riagendr)) %>%       
+  filter(is.na(riagendr) | riagendr %in% c(1, 2))  
+
+demo_sex <- demo %>%
+  transmute(seqn, age = ridageyr,
+            sex = factor(riagendr, levels=c(1,2), labels=c("Male","Female")))
+
+dat_raw <- demo_sex %>%
+  left_join(sbp_raw, by="seqn") %>%  
+  filter(age >= 20) %>%
+  mutate(
+    sbp_raw = ifelse(is.nan(sbp_raw), NA_real_, sbp_raw) 
+  )
+# Draw BEFORE plots
+# sbp boxplot (BEFORE)
+sbp_before_df <- dat_raw %>% transmute(stage = "Before (raw sbp)", value = sbp_raw)
+x <- sbp_before_df$value
+qs <- quantile(x, c(.25,.75), na.rm = TRUE)  
+iqr <- qs[2]-qs[1]
+upper_whisker <- min(max(x, na.rm = TRUE), qs[2] + 1.5*iqr)  
+sbp_before_label_y <- upper_whisker + 0.05*iqr
+sbp_before_N <- sum(!is.na(x))   
+
+p_sbp_before <- ggplot(sbp_before_df, aes(stage, value, fill = stage)) +
+  geom_boxplot(width = 0.6, outlier.alpha = 0.15, fatten = 1.2) +
+  geom_text(data = tibble(stage="Before (raw sbp)", y=sbp_before_label_y, N=sbp_before_N),
+            aes(stage, y, label=paste0("n = ", N)), hjust = -1, size = 3.5, inherit.aes = FALSE) +
+  scale_fill_manual(values = c("Before (raw sbp)" = "#D6E9F8")) +
+  labs(title = "sbp (BEFORE): Raw Distribution", x = NULL, y = "sbp") +
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.12))) +
+  theme_minimal(base_size = 12) + theme(legend.position = "none", panel.grid.minor = element_blank())
+ggsave("outputs/q1_box_sbp_before.png", p_sbp_before, bg = "white")
+p_sbp_before
+
+# OUTLIER CLEANING (then compute cleaned means)
+sbp_LO <- 70
+sbp_HI <- 260
+
+q1 <- quantile(bpx$sbp_mean, 0.25, na.rm = TRUE)
+q3 <- quantile(bpx$sbp_mean, 0.75, na.rm = TRUE)
+iqr <- q3 - q1
+lo_iqr <- q1 - 1.5*iqr
+hi_iqr <- q3 + 1.5*iqr
+med <- median(bpx$sbp_mean, na.rm = TRUE)
+madv <- mad(bpx$sbp_mean, na.rm = TRUE)
+z <- (bpx$sbp_mean - med)/(madv*1.4826)
+
+sbp_clean <- bpx %>%
+  transmute(seqn, sbp_mean) %>%
+  mutate(
+    z = (sbp_mean - med)/(madv*1.4826),
+    flag = (sbp_mean < sbp_LO | sbp_mean > sbp_HI) |
+      (sbp_mean < lo_iqr | sbp_mean > hi_iqr) |
+      (abs(z) > 3.5),
+    sbp_mean_clean = ifelse(flag, NA_real_, sbp_mean)
+  ) %>%
+  select(seqn, sbp_mean_clean)
+# Build AFTER (clean) dataset 
+data_clean <- demo_sex %>%
+  left_join(sbp_clean, by="seqn") %>%
+  filter(age >= 20) %>%
+  mutate(
+    sbp_mean_clean = ifelse(is.nan(sbp_mean_clean), NA_real_, sbp_mean_clean)  
+  )
+# sbp boxplot (AFTER)
+sbp_after_df <- data_clean %>% transmute(stage = "After (clean sbp)", value = sbp_mean_clean)
+x <- sbp_after_df$value
+qs <- quantile(x, c(.25,.75), na.rm = TRUE); 
+iqr <- qs[2]-qs[1]
+upper_whisker <- min(max(x, na.rm = TRUE), qs[2] + 1.5*iqr)
+sbp_after_label_y <- upper_whisker + 0.05*iqr
+sbp_after_N <- sum(!is.na(x))
+
+p_sbp_after <- ggplot(sbp_after_df, aes(stage, value, fill = stage)) +
+  geom_boxplot(width = 0.6, outlier.alpha = 0.15, fatten = 1.2) +
+  geom_text(data = tibble(stage="After (clean sbp)", y=sbp_after_label_y, N=sbp_after_N),
+            aes(stage, y, label=paste0("n = ", N)), hjust = -1, size = 3.5, inherit.aes = FALSE) +
+  scale_fill_manual(values = c("After (clean sbp)" = "#FCE5CD")) +
+  labs(title = "sbp (AFTER): Cleaned Distribution", x = NULL, y = "sbp") +
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.12))) +
+  theme_minimal(base_size = 12) + theme(legend.position = "none", panel.grid.minor = element_blank())
+ggsave("outputs/q1_box_sbp_after.png", p_sbp_after, bg = "white")
+p_sbp_after
+# Missing value comparison
+  miss_before <- tibble(
+    stage     = "Before",
+    variable  = "sbp",
+    n_missing = sum(is.na(dat_raw$sbp_raw)),
+    n_total   = nrow(dat_raw)
+  ) %>% mutate(p_missing = n_missing / n_total)
+
+miss_after <- tibble(
+  stage     = "After",
+  variable  = "sbp",
+  n_missing = sum(is.na(data_clean$sbp_mean_clean)),
+  n_total   = nrow(data_clean)
+) %>% mutate(p_missing = n_missing / n_total)
+
+miss_long <- bind_rows(miss_before, miss_after) %>%
+  mutate(stage = factor(stage, levels = c("Before","After")),  
+         variable = factor(variable, levels = "sbp"))          
+
+p_na_bar_1 <- ggplot(miss_long, aes(variable, p_missing, fill = stage)) +
+  geom_col(width=0.6, position="dodge") +                                                  
+  geom_text(aes(label = paste0(scales::percent(p_missing, 0.1),
+                               "\n(", n_missing, "/", n_total, ")")),                      
+            vjust=-0.2, size=3.5) +
+  scale_y_continuous(labels=scales::percent) +
+  labs(title = "SBP Missingness Before vs After Cleaning", x=NULL, y="Missing rate") +
+  theme_minimal(base_size=12) + theme(legend.position="top")
+
+pos <- position_dodge(width = 0.65) 
+
+p_na_bar_2 <- ggplot(miss_long, aes(variable, p_missing, fill = stage)) +
+  geom_col(width = 0.6, position = pos) +
+  geom_text(aes(label = paste0(scales::percent(p_missing, 0.1),
+                               "\n(", n_missing, "/", n_total, ")")),
+            position = pos, vjust = -0.2, size = 3.5, lineheight = 0.95) +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.12))) +
+  scale_fill_manual(values = c("Before" = "#9EC5FE", "After" = "#FFCF99")) +
+  labs(title = "Missingness (NA) Before vs After Outlier Removal (sbp)",
+       x = NULL, y = "Missing rate", fill = "Stage") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"),
+        legend.position = "top")
+ggsave("outputs/q1_na_sbp_before_after.png", p_na_bar_2, bg = "white")
+p_na_bar_2
+#plot
+dat_clean_all <- demo_sex %>%
+  filter(age >= 20) %>%
+  left_join(sbp_clean, by = "seqn") %>%
+  left_join(bmi_clean, by = "seqn") %>%
+  mutate(
+    sbp_mean_clean  = ifelse(is.nan(sbp_mean_clean), NA_real_, sbp_mean_clean),
+    bmxbmi_clean    = ifelse(is.nan(bmxbmi_clean), NA_real_, bmxbmi_clean)
+  )
+# 只取 sbp 和 bmi 都不缺值的
+dat_plot <- dat_clean_all[!is.na(dat_clean_all$sbp_mean_clean) & !is.na(dat_clean_all$bmxbmi_clean), ]
+
+col_vec <- ifelse(dat_plot$sex == "Male", "#4e79a7", "lightcoral")
+
+plot(dat_plot$bmxbmi_clean, dat_plot$sbp_mean_clean,
+     col = col_vec, pch = 16,
+     xlab = "BMI (cleaned)",
+     ylab = "SBP (cleaned)",
+     main = "Scatter Plot of Cleaned BMI vs SBP by Sex",
+     cex = 0.6)
+
+legend("topright", legend = c("Male", "Female"),
+       col = c("#4e79a7", "lightcoral"), pch = 16,cex=1)
+```
+
+
+### 3.Week 6 Components (EDU, Race, and BP Trials)
+##### Recode and relabel variables (EDU & Race). 
+##### Distribution tables and plots (EDU, Race).
+##### Export CSV + Quarto/Markdown table.
+##### Reshape BP trials (wide → long).
+##### Boxplots for SBP & DBP across trials.
+### 4. Homework Extensions (if applicable)
+
+##### Race distribution (homework Q2).
+
+##### Select two trials with the largest difference (homework Q3).
+```{r}
+# Check the original coding distribution
+demo %>% count(dmdeduc2)
+
+# Recode & relabel
+dat_edu <- demo %>%
+  transmute(
+    seqn,
+    age = ridageyr,
+    EDU = case_when(                  
+      dmdeduc2 %in% 1:5 ~ dmdeduc2,  
+      TRUE ~ NA_real_                 
+    )
+  ) %>%
+  mutate(
+    EDU = factor(EDU,                
+                 levels = 1:5,
+                 labels = c("<9th grade", "9–11th grade", "High school/GED", 
+                            "Some college/AA", "College or above"))
+  ) %>%
+  left_join(dat_clean %>% select(seqn, bmxbmi_clean), by = "seqn") %>%
+  drop_na(EDU, bmxbmi_clean)
+
+dat_race <- demo %>%
+  transmute(
+    seqn,
+    age = ridageyr,
+    RACE = case_when(                  
+      ridreth3 %in% c(1,2,3,4,6) ~ ridreth3,   
+      TRUE ~ NA_real_                 
+    )
+  ) %>%
+  mutate(
+    RACE = factor(RACE,                 
+                 levels = c(1,2,3,4,6),
+                 labels = c("Mexican American", "Other Hispanic", "Non-Hispanic White", 
+                            "Non-Hispanic Black", "Non-Hispanic Asian"))
+  ) %>%
+  left_join(dat_clean %>% select(seqn, bmxbmi_clean), by = "seqn") %>%
+  drop_na(RACE, bmxbmi_clean)
+
+# distribution table
+edu_dist <- dat_edu %>%
+  count(EDU) %>%                 
+  mutate(prop = n / sum(n),      
+         variable = "EDU") %>%   
+  rename(category = EDU)         
+
+race_dist <- dat_race %>%
+  count(RACE) %>%                 
+  mutate(prop = n / sum(n),      
+         variable = "RACE") %>%   
+  rename(category = RACE)  
+
+# output table & csv
+write.csv(edu_dist, file = "outputs/EDU_distribution.csv", row.names = FALSE) 
+library(knitr)
+kable(edu_dist, digits = 3, caption = "Distribution of Educational Attainment (EDU)")
+write.csv(race_dist, file = "outputs/RACE_distribution.csv", row.names = FALSE) 
+kable(race_dist, digits = 3, caption = "Distribution of ethnicity(RACE)")
+
+# Boxplot for visualization
+dat_bmi <- dat_clean %>%
+  select(seqn, bmxbmi_clean) %>%
+  left_join(dat_edu %>% select(seqn,age, EDU), by = "seqn") %>%
+  left_join(dat_race %>% select(seqn, RACE), by = "seqn") %>%
+  drop_na(bmxbmi_clean, EDU, RACE)
+
+#bmi為x軸，用race分組，edu上色
+p1 <- ggplot(dat_bmi, aes(x = bmxbmi_clean , y = RACE, fill = EDU)) +
+  geom_boxplot(position = position_dodge(0.8), outlier.alpha = 0.2) +
+  labs(title = "BMI distribution by Race and Education",
+       x = "bmi", y = "race") +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+ggsave("outputs/BMI_by_Race_EDU.png", p1, width = 10, height = 6, bg = "white")
+p1 
+#bmi為x軸，用edu分組，race上色
+p2 <- ggplot(dat_bmi, aes(x =bmxbmi_clean, y =EDU, fill = RACE)) +
+  geom_boxplot(position = position_dodge(0.8), outlier.alpha = 0.2) +
+  labs(title = "BMI distribution by Education and Race",
+       x = "bmi", y = "Education Level") +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+ggsave("outputs/BMI_by_EDU_Race.png", p2, width = 10, height = 6, bg = "white")
+p2 
+
+library(tidyverse)
+#clean bp data
+sbp_LO <- 70
+sbp_HI <- 260
+dbp_LO <- 40
+dbp_HI <- 150
+
+# Clean SBP & DBP
+bpx_clean <- bpx %>%
+  mutate(across(all_of(sbp_cols), ~{
+    x <- .
+    x_non_na <- x[!is.na(x)]
+    q1 <- quantile(x_non_na, 0.25)
+    q3 <- quantile(x_non_na, 0.75)
+    iqr <- q3 - q1
+    lo_iqr <- q1 - 1.5*iqr
+    hi_iqr <- q3 + 1.5*iqr
+    med <- median(x_non_na)
+    madv <- mad(x_non_na)
+    z <- ifelse(madv > 0, (x - med)/(madv*1.4826), 0)
+    # outlier 直接 NA
+    ifelse(x < sbp_LO | x > sbp_HI | x < lo_iqr | x > hi_iqr | abs(z) > 3.5, NA_real_, x)
+  })) %>%
+  mutate(across(all_of(dbp_cols), ~{
+    x <- .
+    x_non_na <- x[!is.na(x)]
+    q1 <- quantile(x_non_na, 0.25)
+    q3 <- quantile(x_non_na, 0.75)
+    iqr <- q3 - q1
+    lo_iqr <- q1 - 1.5*iqr
+    hi_iqr <- q3 + 1.5*iqr
+    med <- median(x_non_na)
+    madv <- mad(x_non_na)
+    z <- ifelse(madv > 0, (x - med)/(madv*1.4826), 0)
+    ifelse(x < dbp_LO | x > dbp_HI | x < lo_iqr | x > hi_iqr | abs(z) > 3.5, NA_real_, x)
+  }))
+
+# 轉換格式
+bpx_long_clean <- bpx_clean %>%
+  select(seqn, all_of(c(sbp_cols, dbp_cols))) %>%
+  pivot_longer(
+    cols = -seqn,
+    names_to = c("measure", "trial"),
+    names_pattern = "^bpxo([sd]i|sy)([1-3])$",
+    values_to = "value"
+  ) %>%
+  mutate(
+    measure = recode(measure,
+                     "sy" = "SBP",
+                     "di" = "DBP"),
+    trial = as.integer(trial)
+  )
+
+
+#boxplot
+ggplot(bpx_long_clean, aes(x = factor(trial), y = value, fill = measure)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  facet_wrap(~ measure, scales = "free_y") +
+  labs(title = "Distribution of SBP & DBP across 3 Trials (Cleaned Data)",
+       x = "Trial", y = "Blood Pressure (mmHg)") +
+  theme_minimal(base_size = 10)
+
+
+
+#choose 2 trails
+bpx_top2 <- bpx_long_clean %>%
+  filter(!is.na(value)) %>%
+  group_by(seqn, measure) %>%
+  summarise(
+    min_value = min(value),
+    max_value = max(value),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = c(min_value, max_value),
+               names_to = "trial_type",
+               values_to = "value")
+
+bpx_top2 <- bpx_long_clean %>%
+  group_by(seqn, measure) %>%
+  filter(!is.na(value)) %>%   # 忽略 NA
+  slice(c(which.min(value), which.max(value))) %>%  # 每人選最小值與最大值
+  ungroup()
+#boxplot
+ggplot(bpx_top2, aes(x = factor(trial), y = value, fill = measure)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  facet_wrap(~ measure, scales = "free_y") +
+  labs(title = "Distribution of SBP & DBP across two trials that show the largest difference for each subject",
+       x = "Trial", y = "Blood Pressure (mmHg)") +
+  theme_minimal(base_size = 10)
+
+```
+
+### 5.Conclusion
+##### A short paragraph summarizing the findings.
+###### my brief conclusion about the plots from "BMI distribution in different races and education levels"
+"BMI distribution by Race and Education"
+不同種族中，非西班牙裔亞洲人的bmi和其他種族相比較低，且不同種族中，不同教育程度對bmi的影響沒有一定的方向，在非西班牙裔亞洲人中，教育程度為some college/AA的bmi較高，其他教育程度沒有明顯差異；在非西班牙裔白人中，教育程度為college or above的族群bmi較低，其他教育程度沒有明顯差異。（未提到的為該種族中，沒有任一個教育程度的族群和其他相比有較明顯的bmi差異）
+"BMI distribution by Education and Race"
+不同教育程度的bmi分布差異不大，但可以看到不論哪個教育程度，非西班牙裔亞洲人的bmi和其他種族相比較低。
+
+###### my brief conclusion about the plots from "SBP and DBP across the three trials", whether these blood pressure values were measured at long intervals or on the same day to avoid errors.
+不論是三次血壓值皆採計，或是同一個人挑兩次差距較大的血壓值，三個測量值看起來都沒有太大的差異，因此推測三次血壓的量測時間為同一天，並非長期追蹤。
+
+##### Highlight what you learned about reproducible workflows.
+透過使用相同的資料和程式碼，得到相同的分析結果，可以讓資料被重複驗證也可以讓多人一起合作變得更方便。
